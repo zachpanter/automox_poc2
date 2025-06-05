@@ -4,16 +4,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
-	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 )
 
 func main() {
-	// ctx := context.Background()
-	// apiImpl := api.NewAPI(ctx)
-
-	// restful.Add(apiImpl.WS)
-
 	ln, err := net.Listen("tcp", "localhost:8080")
 	if err != nil {
 		log.Fatalf("Failed to listen on port 8080: %v", err)
@@ -22,38 +20,59 @@ func main() {
 		conn, _ := ln.Accept()
 		go handleConnection(conn)
 	}
-
-	// log.Println("Starting server on :8080")
-	// log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 func handleConnection(conn net.Conn) {
+	// Ensure connection is closed when function exits
 	defer conn.Close()
-	// Fetch the image from the remote URL
-	resp, err := http.Get("https://placehold.co/600x400/png")
+
+	// Buffer to read incoming request
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
 	if err != nil {
-		log.Printf("Failed to fetch image: %v", err)
+		log.Printf("Failed to read request: %v", err)
 		return
 	}
-	defer resp.Body.Close()
 
-	// Try to detect the content type
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
+	// Get the first line of the request
+	requestLine := strings.SplitN(string(buf[:n]), "\r\n", 2)[0]
+	parts := strings.Split(requestLine, " ")
+
+	// Check path parameter is present
+	if len(parts) < 2 {
+		fmt.Fprint(conn, "HTTP/1.1 400 Bad Request\r\n\r\n")
+		return
 	}
 
-	// Write HTTP response headers
+	// Get image filesys name
+	path := parts[1]
+	filename := strings.TrimPrefix(path, "/")
+
+	// Use root tmp directory
+	fullPath := filepath.Join("/tmp", filename)
+
+	// Get file bytes
+	file, err := os.Open(fullPath)
+	if err != nil {
+		fmt.Fprint(conn, "HTTP/1.1 404 Not Found\r\n\r\n")
+		return
+	}
+	defer file.Close()
+
+	// Prep file-specific MIME
+	ext := filepath.Ext(fullPath)
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		contentType = "application/octet-stream" // Binary if unknown
+	}
+
+	// Write header
 	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: %s\r\n\r\n", contentType)
 
-	// Write the image body to the connection
-	// TODO: Instead of io.Copy, build my own response body and then serve it
-	_, err = io.Copy(conn, resp.Body)
+	// Write body
+	_, err = io.Copy(conn, file) // Copy file contents to the connection
 	if err != nil {
-		log.Printf("Failed to write image to connection: %v", err)
+		log.Printf("Failed to write file to connection: %v", err)
 	}
-
-	conn.Write([]byte(" HTTP/1.1 200 OK"))
-	log.Printf("New connection from %s", conn.RemoteAddr().String())
-	// For now, just close the connection
+	log.Printf("Served file %s to %s", fullPath, conn.RemoteAddr().String())
 }
